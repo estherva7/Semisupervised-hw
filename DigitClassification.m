@@ -1,0 +1,158 @@
+clear all; close all;
+
+% Parameters
+data = 'digits'; % Options are: 'speech', 'digits'
+method = 'autoencoder'; % Options are: 'self-training', 'kmeans', 'autoencoder'
+supervised_model = 'logreg'; % (Self-training and Autoencoder) Options are: 'knn', 'logreg'
+self_iter = 100; % Self-training iterations 
+plabeled = 1; % Percentage of labeled data
+do_pca = 0; % 1 - yes, 0 - no
+pca_var = 0.001; % Percentage of variance removed
+
+if strcmp(data,'digits') == 1
+    load mnist_uint8.mat
+    X = [train_x; test_x];
+    X = double(X)/255; %Normalize 0-1
+    y_vec = [train_y; test_y];
+    y = vec2ind(y_vec');
+    Nl = round(plabeled/100*numel(y));
+    
+    Xl = X(1:Nl,:); Xu = X(Nl+1:end,:);
+    yl = y(1:Nl); yu = y(Nl+1:end);
+    yl_vec = y_vec(1:Nl,:); yu_vec= y_vec(Nl+1,:);
+    num_labels = 10;
+else if strcmp(data,'speech')
+    load speech_train.mat
+    load speech_test.mat
+    X = [train_data.input; test_data.input];
+    %X = normalize_mat(X'); X = X';
+    y = [train_data.target; test_data.target]'; 
+    X = X(1:7790,:); y = y(1:7790);
+    y_vec = full(ind2vec(y))';
+    Nl = round(plabeled/100*numel(y));
+    Xl = X(1:Nl,:); Xu = X(Nl+1:end,:);
+    yl = y(1:Nl); yu = y(Nl+1:end);
+    yl_vec = y_vec(1:Nl,:); yu_vec= y_vec(Nl+1,:);
+    num_labels = 26;
+    end
+end
+
+if do_pca == 1
+    [X pca_settings] = featureReductionPCA(X,pca_var); X = X';
+    Xl = X(1:Nl,:);
+    Xu = X(Nl+1:end,:);
+end
+
+if strcmp(method, 'self-training') ==1
+    Xtrain = Xl; Xtest = Xu;
+    ytrain = yl; ytest = yu;
+    
+    Nu = floor(numel(yu)/self_iter);
+
+    if strcmp(supervised_model,'knn') == 1
+        for ii = 1: self_iter
+            model = knnFit(Xtrain, ytrain, 100);
+            yhat = knnPredict(model, X);
+            Er(ii) = numel(find((y~=yhat')==1))/numel(y)
+            [yhat prob] = knnPredict(model, Xtest);
+            [m pred] = max(prob');
+            [m sortidx] = sort(m,2,'descend');
+            Xtrain = [Xtrain; Xtest(sortidx(1:Nu),:)];
+            ytrain = [ytrain pred(sortidx(1:Nu))];
+            Xtest = Xtest(sortidx(Nu+1:end),:);
+        end
+    else if strcmp(supervised_model, 'logreg') == 1
+        for ii = 1: self_iter
+            model = logregFit(Xtrain, ytrain);
+            yhat = logregPredict(model, X);
+            Er(ii) = numel(find((y~=yhat')==1))/numel(y)
+            [yhat prob] = logregPredict(model, Xtest);
+            [m pred] = max(prob');
+            [m sortidx] = sort(m,2,'descend');
+            Xtrain = [Xtrain; Xtest(sortidx(1:Nu),:)];
+            ytrain = [ytrain pred(sortidx(1:Nu))];
+            Xtest = Xtest(sortidx(Nu+1:end),:);
+        end
+        end
+    end
+end
+
+if strcmp(method, 'kmeans') == 1   
+    % Perform kmeans on all data, assign each cluster to the class with
+    % more labeled data in that cluster 
+    [cidx, ctrs] = kmeans(X, num_labels);
+    yhat = zeros(size(yu,1),1);
+    for c = 1: num_labels
+        idx = find(cidx(1:Nl) == c);
+        h = hist(yl(idx),[1:num_labels]);
+        [dummy num] = max(h);
+        all_idx = find(cidx == c);
+        yhat(all_idx) = num;
+    end
+    er = numel(find((y~=yhat)==1))/numel(y)
+end
+
+if strcmp(method, 'autoencoder') == 1
+    input_layer_size = size(X,2);
+    
+    %CLASSIFICATION: OPTION 1
+    % Train a Feed-fordward neural network with back-propagation
+    nn = nnsetup([input_layer_size 100 num_labels]);
+    nn.activation_function              = 'sigm';
+    nn.learningRate                     = 1;
+    nn.dropoutFraction                  = 0.3;
+    nn.inputZeroMaskedFraction          = 0.3;
+   
+    opts.numepochs =   100;
+    opts.batchsize = 10;
+    nn = nntrain(nn, Xl, yl_vec, opts); %Train with labeled data
+    [er1, bad] = nntest(nn, X, y_vec); %Test on all data
+    er1
+    
+    %CLASSIFICATION: OPTION 2
+    %  Train a stacked denoising autoencoder (SDAE) and use
+    % the last hidden layer (mapped data) as new features
+    sae = saesetup([input_layer_size 10]);
+    sae.ae{1}.activation_function       = 'sigm';
+    sae.ae{1}.learningRate              = 0.1;
+    sae.ae{1}.inputZeroMaskedFraction   = 0.9;
+    sae.ae{1}.dropoutFraction           = 0.9;
+    opts.numepochs =   50;
+    opts.batchsize = 10;
+    sae = saetrain(sae, X, opts);
+    visualize(sae.ae{1}.W{1}(:,2:end)')
+    
+    % Then train another classifier using autoencoder extracted features
+    Xtrain_feat = Xl*sae.ae{1}.W{1}(:,2:end)';
+    Xtest_feat = X*sae.ae{1}.W{1}(:,2:end)';
+    
+    if strcmp(supervised_model,'knn') == 1
+        model = knnFit(Xtrain_feat, yl, 50);
+        [yhat] = knnPredict(model, Xtest_feat);  
+    else if strcmp(supervised_model,'logreg') == 1
+        model = logregFit(Xtrain_feat, yl);
+        [yhat] = logregPredict(model, Xtest_feat);  
+        end
+    end
+    
+    er2 = numel(find(yhat ~= y') == 1)/numel(y);
+    er2
+    
+    %CLASSIFICATION: OPTION 3
+    % Use the SDAE to initialize a Feed-fordward NN
+    nn = nnsetup([input_layer_size 100 num_labels]);
+    nn.activation_function              = 'sigm';
+    nn.learningRate                     = 1;
+    nn.dropoutFraction                  = 0.5;
+    nn.inputZeroMaskedFraction          = 0.5;
+    nn.W{1} = sae.ae{1}.W{1};
+ 
+    % Train the FFNN
+    opts.numepochs =   100;
+    opts.batchsize = 10;
+    nn = nntrain(nn, Xl, yl_vec, opts); %Train with labeled data
+    [er3, bad] = nntest(nn, X, y_vec); %Test on all data
+    er3
+   
+end
+
