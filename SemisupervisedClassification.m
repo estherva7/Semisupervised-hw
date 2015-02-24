@@ -112,7 +112,7 @@ if strcmp(method, 'autoencoder') == 1
     %CLASSIFICATION: OPTION 2
     %  Train a stacked denoising autoencoder (SDAE) and use
     % the last hidden layer (mapped data) as new features
-    sae = saesetup([input_layer_size 10]);
+    sae = saesetup([input_layer_size 100]);
     sae.ae{1}.activation_function       = 'sigm';
     sae.ae{1}.learningRate              = 0.2;
     sae.ae{1}.inputZeroMaskedFraction   = 0.4;
